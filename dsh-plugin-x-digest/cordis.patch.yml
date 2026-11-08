@@ -1,0 +1,23 @@
+# ============================================================================
+# dsh-plugin-x-digest —— 挂载声明
+# ============================================================================
+# 这个 patch 会往宿主组合里插入一个 x-digest 插件条目。
+# 安装方式：
+#   dsh plugin --profile desktop add link:<本目录绝对路径>
+# 或者手工：把本目录放进 <profile>/node_modules/，再在 profile 的
+# cordis.patch.yml 里加同样的 insert 块。
+#
+# config 全部可选，也可以改用 $DSH_HOME/x-digest.json：
+#   { "baseUrl": "http://127.0.0.1:8788", "token": "..." }
+# ============================================================================
+
+- insert:
+    - id: x-digest
+      name: dsh-plugin-x-digest
+      config:
+        # VPS 上的服务地址；本机 SSH 隧道过来就是 127.0.0.1:8788
+        baseUrl: http://127.0.0.1:8788
+        # 与 VPS 上 .env 的 DIGEST_TOKEN 一致
+        token: ''
+        # 可选：默认关注列表（逗号分隔，不带 @）
+        defaultHandles: ''

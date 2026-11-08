@@ -1,0 +1,20 @@
+[Unit]
+Description=x-digest - DeepSeek 自己刷 X 然后 @ 我
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/x-digest
+EnvironmentFile=/home/YOUR_USER/x-digest/.env
+# 若 node 不在 /usr/bin/node，改成 `command -v node` 的输出
+ExecStart=/usr/bin/node src/cli.mjs --serve
+Restart=always
+RestartSec=15
+# 精简日志（想看全部就去掉这两行注释）
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

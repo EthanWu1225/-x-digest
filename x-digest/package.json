@@ -1,0 +1,23 @@
+{
+  "name": "x-digest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "定时刷 X（推特）→ DeepSeek 挑出你可能感兴趣的 → 用你的账号 @ 你。部署在 VPS 上，零依赖。",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "probe": "node src/cli.mjs --probe",
+    "session-probe": "node src/cli.mjs --session-probe",
+    "auth:start": "node src/cli.mjs --auth-start",
+    "auth:finish": "node src/cli.mjs --auth-finish",
+    "once": "node src/cli.mjs --once --dry",
+    "run": "node src/cli.mjs --serve",
+    "whoami": "node src/cli.mjs --whoami",
+    "browser:login": "node src/cli.mjs --browser-login"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}

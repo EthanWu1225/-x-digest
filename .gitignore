@@ -1,0 +1,22 @@
+# ── 密钥与运行时数据（绝不提交）──
+.env
+.env.*
+!.env.example
+data/
+*.log
+
+# ── 依赖 ──
+node_modules/
+.pnpm-store/
+
+# ── 系统与编辑器 ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ── 临时产物 ──
+*.tmp
+*.bak
+*.png
+!docs/*.png
