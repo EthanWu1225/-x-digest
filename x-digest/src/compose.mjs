@@ -17,6 +17,23 @@ function shorten(text, maxChars) {
 }
 
 /**
+ * 评论模式专用文案：只写一句"为什么值得看"。
+ *
+ * 为什么不复用 compose()：那条文案里带原推链接，而评论本来就挂在原推下面，
+ * 再贴一次链接会让 X 渲染出引用卡片，看起来像"单独发了一条推"。
+ */
+export function composeComment(pick, targetHandle, { maxLength = 275 } = {}) {
+  const reason = shorten(String(pick?.reason ?? '').trim() || '这条值得看', 70);
+  const base = targetHandle ? `@${targetHandle} ${reason}` : reason;
+
+  if (weightedLength(base) <= maxLength) return { text: base, dropped: 0 };
+
+  // 超长就只留 @ 和最短理由
+  const short = targetHandle ? `@${targetHandle} ${shorten(reason, 24)}` : shorten(reason, 24);
+  return { text: short.slice(0, 280), dropped: 0 };
+}
+
+/**
  * 拼一条推文：开头 @ 你，然后每条一行，附原推链接。
  * 超长时先压缩理由，再减少条目（最少留 1 条）。
  */

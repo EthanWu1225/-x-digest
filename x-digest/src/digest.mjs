@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { fetchAll, fetchSessionTimeline, fetchSearchTimeline, fetchHomeTimeline } from './sources.mjs';
 import { judge } from './judge.mjs';
-import { compose } from './compose.mjs';
+import { compose, composeComment } from './compose.mjs';
 import { loadState, saveState, pruneState, markSeen, newCandidates } from './state.mjs';
 import { latestTweet, latestTweetId, postTweet } from './xpost.mjs';
 import { loadSessionFromFile } from './xsession.mjs';
@@ -266,7 +266,11 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   }
 
   result.picks = picks;
-  const { text, dropped } = compose(picks, cfg.targetHandle || 'you');
+  // comment 模式挂在原推下面，文案不能带原推链接（否则 X 会渲染成引用卡片，像单独发推）
+  const { text, dropped } =
+    cfg.postMode === 'comment'
+      ? composeComment(picks[0], cfg.targetHandle || 'you')
+      : compose(picks, cfg.targetHandle || 'you');
   result.text = text;
   if (dropped > 0) log.warn(`文案超长，丢了 ${dropped} 条（想都发就调小 MAX_PICKS 或缩短理由）`);
 
@@ -389,6 +393,7 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
 
 
 
