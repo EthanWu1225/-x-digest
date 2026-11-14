@@ -77,6 +77,8 @@ export function loadConfig() {
     postMode,
     maxPostsPerDay: num('MAX_POSTS_PER_DAY', 3),
     minIntervalMinutes: num('MIN_INTERVAL_MINUTES', 90),
+    // 一轮里发多条评论时，两条之间的间隔（秒），避免像机器人连发
+    commentGapSeconds: num('COMMENT_GAP_SECONDS', 25),
     quietStart: str('QUIET_START', '23:00'),
     quietEnd: str('QUIET_END', '08:00'),
     timeZone: str('TZ', 'Asia/Shanghai'),
@@ -188,8 +190,8 @@ export function loadConfig() {
       (cfg.x.consumerKey && cfg.x.consumerSecret && cfg.x.accessToken && cfg.x.accessTokenSecret),
   );
 
-  // comment 模式只挑一条：一条回复只能挂在一个推文下面，挑多了反而像刷屏
-  if (cfg.postMode === 'comment') cfg.maxPicks = 1;
+  // comment 模式也能挑多条：每条各挂在自己的推文下面，一轮最多 5 条封顶
+  if (cfg.postMode === 'comment') cfg.maxPicks = Math.min(cfg.maxPicks, 5);
 
   // 提及白名单：没显式配就只认 TARGET_HANDLE（你的主号）
   const whitelist = csv('MENTION_WHITELIST').map(handle).filter(Boolean);
@@ -223,6 +225,7 @@ export function validateForRun(cfg) {
   }
   return problems;
 }
+
 
 
 

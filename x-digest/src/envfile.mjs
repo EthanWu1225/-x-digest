@@ -22,6 +22,7 @@ const ALLOWED = {
   maxPicks: 'MAX_PICKS',
   maxPostsPerDay: 'MAX_POSTS_PER_DAY',
   minIntervalMinutes: 'MIN_INTERVAL_MINUTES',
+  commentGapSeconds: 'COMMENT_GAP_SECONDS',
   pollIntervalMinutes: 'POLL_INTERVAL_MINUTES',
   mentionWatch: 'MENTION_WATCH',
   mentionPollMinutes: 'MENTION_POLL_MINUTES',
@@ -84,6 +85,7 @@ export function patchEnvKeys(file, pairs = {}) {
   if (changed.length) writeFileSync(file, lines.join('\n'), 'utf8');
   return changed;
 }
+
 
 
 

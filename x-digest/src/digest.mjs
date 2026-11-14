@@ -248,11 +248,7 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
     log.error(error);
   }
 
-  // comment 模式只挑一条：一条回复只能挂在一个推文下面，挑多了像刷屏
-  if (cfg.postMode === 'comment' && picks.length > 1) {
-    log.info(`comment 模式只保留第一条（从 ${picks.length} 条裁到 1 条）`);
-    picks.length = 1;
-  }
+  // comment 模式也可以挑多条：每条各自挂在自己的推文下面，各写一句评论
 
   // 不管挑没挑中，都记成"看过"，避免下次重复消耗 token
   markSeen(state, candidates);
@@ -266,20 +262,30 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   }
 
   result.picks = picks;
-  // comment 模式挂在原推下面，文案不能带原推链接（否则 X 会渲染成引用卡片，像单独发推）
-  const { text, dropped } =
+  // comment 模式拆成多条消息：每条挂在自己的推文下面，文案不带原推链接
+  // （带了 X 会渲染成引用卡片，看起来像单独发推）
+  const messages =
     cfg.postMode === 'comment'
-      ? composeComment(picks[0], cfg.targetHandle || 'you')
-      : compose(picks, cfg.targetHandle || 'you');
-  result.text = text;
-  if (dropped > 0) log.warn(`文案超长，丢了 ${dropped} 条（想都发就调小 MAX_PICKS 或缩短理由）`);
+      ? picks.map((p) => ({
+          text: composeComment(p, cfg.targetHandle || 'you').text,
+          replyTo: p.id,
+          url: p.url,
+          handle: p.handle,
+        }))
+      : [{ text: compose(picks, cfg.targetHandle || 'you').text, replyTo: null, dropped: 0 }];
+
+  result.text = messages.map((m) => m.text).join('\n---\n');
+  result.messages = messages.length;
+  if (cfg.postMode !== 'comment' && messages[0]?.dropped > 0) {
+    log.warn(`文案超长，丢了 ${messages[0].dropped} 条（想都发就调小 MAX_PICKS 或缩短理由）`);
+  }
 
   if (dry || cfg.postMode === 'off') {
     result.skipped = dry ? 'dry-run' : 'POST_MODE=off';
     result.posted = null;
     rememberPicks(cfg, picks, 'dry', '干跑，未发送');
     saveState(cfg.paths.state, pruneState(state));
-    log.info(`[${result.skipped}] 本该发这条：\n${text}`);
+    log.info(`[${result.skipped}] 本该发 ${messages.length} 条：\n${result.text}`);
     return result;
   }
 
@@ -307,92 +313,124 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
     return result;
   }
 
-  try {
-    // 发推走 cookie 会话（GraphQL CreateTweet）：v1.1 的 statuses/update 已被 X 删除。
-    // 没有可用 cookie 时才退回 OAuth1 的老路（那条现在多半也会失败，但保留给付费 API 用户）。
-    const session = tryLoadSession(cfg);
-    // reply 模式只回复「最近 7 天内」的推；否则改成单独发一条 @ 你
-    // （不然会把内容塞到几个月前的旧推下面，看起来像考古）
-    let replyTo = null;
-    if (cfg.postMode === 'reply' && cfg.targetHandle) {
-      const latest = await latestTweet(cfg.targetHandle, cfg, session);
-      const maxAgeMs = 7 * 86400_000;
-      if (latest && Date.now() - latest.createdAt < maxAgeMs) {
-        replyTo = latest.id;
-      } else {
-        log.info('目标最近 7 天没发推，改用「单独发一条 @ 你」');
-      }
-    } else if (cfg.postMode === 'comment') {
-      // comment 模式：回复在「挑中的那条推文」下面，正文里 @ 你
-      replyTo = picks[0]?.id ?? null;
-      if (!replyTo) log.warn('comment 模式但没有可回复的目标，退化成单独发一条');
-      else log.info(`将回复在 @${picks[0].handle} 的推文下：${picks[0].url}`);
-    }
-
-    // 发送通道：优先官方 API；额度不足（402）或强制 browser 时，用浏览器自动化
-    const targetUrl =
-      cfg.postMode === 'comment'
-        ? picks[0]?.url ?? ''
-        : replyTo
-          ? `https://x.com/i/status/${replyTo}`
-          : '';
-
-    let posted = null;
-    const tryApi = cfg.postTransport !== 'browser' && cfg.canPost;
-
-    if (tryApi) {
-      try {
-        log.info(`用官方 API 发送（身份：${cfg.actingAs ?? '来自 .env 的 token'}）`);
-        posted = await postTweet(cfg, text, { replyTo });
-      } catch (err) {
-        // auto 模式下任何 API 失败都回退浏览器：
-        // 402（没额度）、401（token 过期且刷新失败）、429（限流）都不该让整轮失败
-        if (cfg.postTransport === 'auto') {
-          log.warn(`API 发送失败（${err.message.slice(0, 80)}…），改用浏览器`);
-        } else {
-          throw err;
-        }
-      }
-    }
-
-    if (!posted) {
-      if (!targetUrl) throw new Error('浏览器发送需要一个目标推文地址（comment / reply 模式才有）');
-      log.info(`用浏览器打开 ${targetUrl} 并回复…`);
-      const context = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
-      try {
-        // 兜底超时：浏览器偶尔会卡在页面加载/选择器上，卡住会一直占着"上一轮还在跑"的锁
-        const res = await Promise.race([
-          replyToTweet(context, targetUrl, text),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（180 秒）')), 180_000)),
-        ]);
-        posted = { id: '', via: 'browser', screenshot: res?.screenshot ?? '' };
-        log.info(`浏览器发送完成${res?.screenshot ? `，截图：${res.screenshot}` : ''}`);
-      } finally {
-        await closeContext(context);
-      }
-    }
-
-    result.posted = posted;
-    state.lastPostAt = Date.now();
-    state.posts = [...(state.posts ?? []), { ts: Date.now(), id: posted.id, replyTo, via: posted.via ?? 'api' }];
-    log.info(
-      posted.id
-        ? `已发出：https://x.com/i/status/${posted.id}${replyTo ? `（回复 ${replyTo}）` : ''}`
-        : `已通过浏览器回复 ${replyTo}（无 API id）`,
-    );
-  } catch (err) {
-    result.errors.push(err.message);
-    state.lastError = err.message;
-    log.error(`发送失败：${err.message}`);
+  // 今天还能发几条
+  const remaining = Math.max(0, cfg.maxPostsPerDay - postsToday(state, cfg));
+  const toSend = force ? messages : messages.slice(0, remaining);
+  if (!toSend.length) {
+    result.skipped = `今天已发 ${cfg.maxPostsPerDay} 条，达到上限`;
+    saveState(cfg.paths.state, pruneState(state));
+    log.info(result.skipped);
+    return result;
   }
 
-  // 记进「刷过的推文」：无论发没发出去，都留一条可回看的记录
-  const action = result.posted ? 'posted' : 'failed';
-  rememberPicks(cfg, picks, action, result.errors[0] ?? '');
+  // 非 comment 模式：reply 要先找到"你最近一条推"作为回复目标
+  if (cfg.postMode !== 'comment' && cfg.postMode === 'reply' && cfg.targetHandle) {
+    const session = tryLoadSession(cfg);
+    const latest = await latestTweet(cfg.targetHandle, cfg, session);
+    const maxAgeMs = 7 * 86400_000;
+    if (latest && Date.now() - latest.createdAt < maxAgeMs) {
+      toSend[0].replyTo = latest.id;
+    } else {
+      log.info('目标最近 7 天没发推，改用「单独发一条 @ 你」');
+    }
+  }
+
+  const postedAll = [];
+  for (let i = 0; i < toSend.length; i += 1) {
+    const m = toSend[i];
+
+    // 多条之间留点间隔，别看着像机器人连发
+    if (i > 0 && cfg.commentGapSeconds > 0) {
+      log.info(`等下一条（${cfg.commentGapSeconds} 秒）…`);
+      await new Promise((r) => setTimeout(r, cfg.commentGapSeconds * 1000));
+    }
+
+    const targetUrl = m.replyTo
+      ? cfg.postMode === 'comment'
+        ? m.url
+        : `https://x.com/i/status/${m.replyTo}`
+      : '';
+
+    try {
+      let posted = null;
+
+      // 1) 官方 API
+      if (cfg.postTransport !== 'browser' && cfg.canPost) {
+        try {
+          log.info(`用官方 API 发第 ${i + 1}/${toSend.length} 条（身份：${cfg.actingAs ?? '来自 .env 的 token'}）`);
+          posted = await postTweet(cfg, m.text, { replyTo: m.replyTo });
+        } catch (err) {
+          if (cfg.postTransport === 'auto') log.warn(`API 发送失败（${err.message.slice(0, 70)}…），改用浏览器`);
+          else throw err;
+        }
+      }
+
+      // 2) 浏览器
+      if (!posted) {
+        if (!targetUrl) throw new Error('浏览器发送需要一个目标推文地址（comment / reply 模式才有）');
+        log.info(`用浏览器打开 ${targetUrl} 并回复…`);
+        const context = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
+        try {
+          // 兜底超时：卡住会一直占着"上一轮还在跑"的锁
+          const res = await Promise.race([
+            replyToTweet(context, targetUrl, m.text),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（180 秒）')), 180_000)),
+          ]);
+          posted = { id: '', via: 'browser', screenshot: res?.screenshot ?? '' };
+        } finally {
+          await closeContext(context);
+        }
+      }
+
+      postedAll.push(posted);
+      state.lastPostAt = Date.now();
+      state.posts = [...(state.posts ?? []), { ts: Date.now(), id: posted.id, replyTo: m.replyTo, via: posted.via ?? 'api' }];
+      log.info(
+        posted.id
+          ? `已发出第 ${i + 1}/${toSend.length} 条：https://x.com/i/status/${posted.id}${m.replyTo ? `（回复 ${m.replyTo}）` : ''}`
+          : `已通过浏览器回复 ${m.replyTo}（第 ${i + 1}/${toSend.length} 条）`,
+      );
+    } catch (err) {
+      result.errors.push(err.message);
+      state.lastError = err.message;
+      log.error(`第 ${i + 1} 条发送失败：${err.message}`);
+      break; // 一条失败就停，避免连续报错刷屏
+    }
+  }
+
+  result.posted = postedAll[0] ?? null;
+  result.postedAll = postedAll;
+
+  // 记进「刷过的推文」：按实际发出去的条数逐条记（发了几条就几条 posted）
+  if (cfg.postMode === 'comment') {
+    toSend.forEach((m, i) => {
+      recordHistory(cfg, {
+        id: m.replyTo,
+        handle: m.handle,
+        url: m.url,
+        reason: m.text.replace(/^@\S+\s*/, '').slice(0, 120),
+        action: postedAll[i] ? 'posted' : 'failed',
+        detail: postedAll[i] ? '' : result.errors[0] ?? '',
+      });
+    });
+    // 没轮到的（超过今日上限的）记为干跑
+    messages.slice(toSend.length).forEach((m) => {
+      recordHistory(cfg, {
+        id: m.replyTo,
+        handle: m.handle,
+        url: m.url,
+        reason: '超过今日上限，未发送',
+        action: 'dry',
+      });
+    });
+  } else {
+    rememberPicks(cfg, picks, postedAll.length ? 'posted' : 'failed', result.errors[0] ?? '');
+  }
 
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
 
 
 

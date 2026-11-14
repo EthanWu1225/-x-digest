@@ -196,6 +196,7 @@ window.__ModuleLoader__.load({
               targetHandle: data.config.targetHandle ?? '',
               postMode: data.config.postMode ?? 'off',
               maxPicks: String(data.config.maxPicks ?? 2),
+              commentGapSeconds: String(data.config.commentGapSeconds ?? 25),
               source: data.config.source ?? 'handles',
               searchQueries: data.config.searchQueries ?? '',
               searchProduct: data.config.searchProduct ?? 'Top',
@@ -614,6 +615,26 @@ window.__ModuleLoader__.load({
                     onChange: (e) => setForm({ ...form, maxPicks: e.target.value }),
                   }),
                 ),
+                h(
+                  'div',
+                  { style: { ...S.field, width: 160 } },
+                  h('label', { style: S.label }, '两条间隔（秒）'),
+                  h('input', {
+                    style: S.input,
+                    type: 'number',
+                    min: 0,
+                    max: 600,
+                    value: form.commentGapSeconds,
+                    onChange: (e) => setForm({ ...form, commentGapSeconds: e.target.value }),
+                  }),
+                ),
+              ),
+              h(
+                'div',
+                { style: { ...S.hint, marginBottom: 10 } },
+                form.postMode === 'comment'
+                  ? `每轮挑 ${form.maxPicks} 条 = 分别在 ${form.maxPicks} 条推文下各回一句，间隔 ${form.commentGapSeconds} 秒。`
+                  : '非 comment 模式会把多条拼成一条文案。',
               ),
               h(
                 'div',
@@ -1006,6 +1027,7 @@ window.__ModuleLoader__.load({
     };
   },
 });
+
 
 
 

@@ -69,6 +69,7 @@ function saveEnvPatch(cfg, patch = {}) {
   if (Object.hasOwn(patch, 'maxPicks')) cfg.maxPicks = Number(patch.maxPicks) || cfg.maxPicks;
   if (Object.hasOwn(patch, 'maxPostsPerDay')) cfg.maxPostsPerDay = Number(patch.maxPostsPerDay) || cfg.maxPostsPerDay;
   if (Object.hasOwn(patch, 'minIntervalMinutes')) cfg.minIntervalMinutes = Number(patch.minIntervalMinutes) || cfg.minIntervalMinutes;
+  if (Object.hasOwn(patch, 'commentGapSeconds')) cfg.commentGapSeconds = Number(patch.commentGapSeconds) || 0;
   if (Object.hasOwn(patch, 'pollIntervalMinutes')) cfg.pollIntervalMinutes = Number(patch.pollIntervalMinutes) || cfg.pollIntervalMinutes;
   if (Object.hasOwn(patch, 'mentionWatch')) cfg.mentionWatch = String(patch.mentionWatch).toLowerCase() === 'true';
   if (Object.hasOwn(patch, 'mentionPollMinutes')) cfg.mentionPollMinutes = Number(patch.mentionPollMinutes) || cfg.mentionPollMinutes;
@@ -209,6 +210,7 @@ export function startServer(cfg, logger) {
           maxPicks: cfg.maxPicks,
           maxPostsPerDay: cfg.maxPostsPerDay,
           minIntervalMinutes: cfg.minIntervalMinutes,
+          commentGapSeconds: cfg.commentGapSeconds,
           pollIntervalMinutes: cfg.pollIntervalMinutes,
           mentionWatch: cfg.mentionWatch,
           mentionPollMinutes: cfg.mentionPollMinutes,
@@ -526,6 +528,7 @@ export function startServer(cfg, logger) {
 
   return { server, close, run };
 }
+
 
 
 
