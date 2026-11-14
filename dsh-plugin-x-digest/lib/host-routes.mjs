@@ -122,6 +122,10 @@ export function registerRoutes(ctx, client, logger) {
         return json(res, 200, await client.history(url.searchParams.get('limit') ?? 30));
       }
 
+      if (path === '/api/x-digest/presets' && req.method === 'GET') {
+        return json(res, 200, await client.presets());
+      }
+
       // 手动跑一轮（默认干跑，不会真的发）
       if (path === '/api/x-digest/run' && req.method === 'POST') {
         const body = await readJson(req).catch(() => ({}));

@@ -9,12 +9,35 @@
 
 import path from 'node:path';
 import os from 'node:os';
+import { existsSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 
 const EDGE_PATHS = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
 ];
+
+const LINUX_BROWSERS = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'];
+
+/**
+ * 按平台挑浏览器：
+ *   · 显式设了 BROWSER_EXECUTABLE 就用它（VPS / Docker 推荐）
+ *   · Windows 用本机 Edge
+ *   · Linux 找系统 chromium/chrome
+ */
+function launchTarget() {
+  const explicit = process.env.BROWSER_EXECUTABLE;
+  if (explicit && existsSync(explicit)) return { executablePath: explicit };
+  if (explicit) return { executablePath: explicit };
+
+  if (process.platform === 'win32') {
+    const edge = EDGE_PATHS.find((p) => existsSync(p));
+    return edge ? { executablePath: edge } : { channel: 'msedge' };
+  }
+
+  const found = LINUX_BROWSERS.find((p) => existsSync(p));
+  return found ? { executablePath: found } : { channel: 'chromium' };
+}
 
 export class BrowserError extends Error {}
 
@@ -29,8 +52,7 @@ export async function launchContext({ dataDir, headless = true }) {
   try {
     const context = await chromium.launchPersistentContext(userDataDir, {
       headless,
-      channel: 'msedge',
-      executablePath: process.platform === 'win32' ? EDGE_PATHS.find((p) => p) : undefined,
+      ...launchTarget(),
       args,
       viewport: { width: 1280, height: 900 },
       locale: 'zh-CN',
@@ -153,3 +175,4 @@ export async function closeContext(context) {
     /* ignore */
   }
 }
+

@@ -9,6 +9,13 @@ const ALLOWED = {
   searchQueries: 'SEARCH_QUERIES',
   searchProduct: 'SEARCH_PRODUCT',
   searchMinLikes: 'SEARCH_MIN_LIKES',
+  presets: 'PRESETS',
+  visionInDigest: 'VISION_IN_DIGEST',
+  visionMaxImages: 'VISION_MAX_IMAGES',
+  filterPolitics: 'FILTER_POLITICS',
+  visionVideo: 'VISION_VIDEO',
+  visionMaxVideos: 'VISION_MAX_VIDEOS',
+  visionVideoFrames: 'VISION_VIDEO_FRAMES',
   watchHandles: 'WATCH_HANDLES',
   targetHandle: 'TARGET_HANDLE',
   postMode: 'POST_MODE',
@@ -77,5 +84,10 @@ export function patchEnvKeys(file, pairs = {}) {
   if (changed.length) writeFileSync(file, lines.join('\n'), 'utf8');
   return changed;
 }
+
+
+
+
+
 
 

@@ -130,6 +130,15 @@ function collectTweets(node, out = [], depth = 0) {
 }
 
 /** GraphQL 的 tweet 节点 → 内部结构。 */
+/** 从 media 里挑码率最高的 mp4 地址。 */
+function bestVideoUrl(media = []) {
+  const variants = media
+    .flatMap((m) => m.video_info?.variants ?? [])
+    .filter((v) => v.content_type === 'video/mp4' && v.url);
+  variants.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
+  return variants[0]?.url ?? '';
+}
+
 export function tweetNodeToItem(node) {
   const legacy = node.legacy ?? {};
   const userResult = node.core?.user_results?.result ?? {};
@@ -156,6 +165,8 @@ export function tweetNodeToItem(node) {
     reposts: Number(legacy.retweet_count ?? 0) || 0,
     replies: Number(legacy.reply_count ?? 0) || 0,
     images: media.map((m) => m.media_url_https ?? m.media_url).filter(Boolean),
+    videoUrl: bestVideoUrl(media),
+    isVideo: media.some((m) => m.type === 'video' || m.type === 'animated_gif'),
     url: `https://x.com/${handle || 'i'}/status/${id}`,
   };
 }
@@ -453,3 +464,4 @@ export function loadSessionFromFile(cfg) {
   session.timeoutMs = cfg.session.timeoutMs ?? session.timeoutMs;
   return session;
 }
+

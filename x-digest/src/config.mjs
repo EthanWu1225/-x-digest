@@ -65,6 +65,8 @@ export function loadConfig() {
     searchProduct: str('SEARCH_PRODUCT', 'Top'),
     // 关键词搜索的赞数门槛：低于这个数的不看（实测能挡掉绝大部分噪音）
     searchMinLikes: num('SEARCH_MIN_LIKES', 100),
+    // 勾了哪些分区（只用于界面回显，关键词仍以 searchQueries 为准）
+    presets: csv('PRESETS'),
     targetHandle: handle(str('TARGET_HANDLE')),
     maxPicks: num('MAX_PICKS', 2),
     maxCandidates: num('MAX_CANDIDATES', 60),
@@ -103,6 +105,22 @@ export function loadConfig() {
       model: str('DEEPSEEK_MODEL', 'deepseek-chat'),
     },
 
+    // 看图：DeepSeek 的 API 不支持图像，所以另配一个 OpenAI 兼容的视觉模型
+    vision: {
+      // 不单独配就用 DeepSeek 的 key（同一个账号、同一个模型）
+      apiKey: str('VISION_API_KEY') || str('DEEPSEEK_API_KEY'),
+      baseUrl: str('VISION_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1').replace(/\/+$/, ''),
+      model: str('VISION_MODEL', 'qwen3-omni-flash'),
+    },
+    // 定时摘要时要不要也给带图的推文看图（更准，但慢一点、花一点钱）
+    visionInDigest: bool('VISION_IN_DIGEST', true),
+    visionMaxImages: num('VISION_MAX_IMAGES', 6),
+    // 视频识别（抽帧 + 多图），比较费时间，每轮限量
+    visionVideo: bool('VISION_VIDEO', true),
+    visionMaxVideos: num('VISION_MAX_VIDEOS', 1),
+    // 每条视频抽几帧（均匀覆盖全片）；帧越多越准也越慢
+    visionVideoFrames: num('VISION_VIDEO_FRAMES', 6),
+
     server: {
       port: num('PORT', 8788),
       host: str('HOST', '127.0.0.1'),
@@ -124,6 +142,8 @@ export function loadConfig() {
 
     // 敏感词额外名单（逗号分隔，会叠加内置清单）
     sensitiveKeywords: csv('SENSITIVE_KEYWORDS'),
+    // 是否过滤政治类内容（选了「政治」分区时可以关掉）
+    filterPolitics: bool('FILTER_POLITICS', true),
 
     session: {
       // 小号的 cookie：{ "auth_token": "...", "ct0": "..." }
@@ -203,4 +223,8 @@ export function validateForRun(cfg) {
   }
   return problems;
 }
+
+
+
+
 

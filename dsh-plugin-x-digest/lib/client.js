@@ -84,9 +84,22 @@ window.__ModuleLoader__.load({
     const ACTION_LABEL = {
       posted: { label: '已发', color: '#15803d' },
       dry: { label: '干跑', color: '#6b7280' },
-      sensitive: { label: '敏感·已跳过', color: '#dc2626' },
+      sensitive: { label: '敏感·已拦截', color: '#dc2626' },
+      flagged: { label: '含敏感词', color: '#b45309' },
       failed: { label: '失败', color: '#dc2626' },
     };
+
+    // 分区预设：内置一份，不依赖宿主路由（这样热更新就能用，不必重启 DSH）
+    const PRESETS = [
+      { id: 'tech', name: '科技', hint: 'AI、开源、硬件、产品', queries: ['(AI OR LLM OR agent) min_faves:100', '("open source" OR github OR GPU) min_faves:150', '(DeepSeek OR OpenAI OR Anthropic) min_faves:100'] },
+      { id: 'science', name: '科学', hint: '论文、物理、生物、太空', queries: ['(arxiv OR paper OR research) min_faves:100', '(physics OR biology OR space) min_faves:200'] },
+      { id: 'finance', name: '财经', hint: '市场、公司、宏观', queries: ['(stock market OR earnings) min_faves:300', '(economy OR inflation OR fed) min_faves:300'] },
+      { id: 'politics', name: '政治', hint: '选举、政策、国际', queries: ['(election OR policy OR congress) min_faves:300', '(geopolitics OR sanctions OR diplomacy) min_faves:300'] },
+      { id: 'sports', name: '体育', hint: 'NBA、足球、赛事', queries: ['(NBA OR football OR soccer) min_faves:300', '(Olympics OR championship OR match) min_faves:300'] },
+      { id: 'entertainment', name: '娱乐', hint: '影视、音乐、明星', queries: ['(movie OR film OR music album) min_faves:300', '(celebrity OR trailer OR concert) min_faves:300'] },
+      { id: 'gaming', name: '游戏', hint: '新作、主机、电竞', queries: ['(gaming OR videogame OR steam) min_faves:200', '(PlayStation OR Nintendo OR Xbox) min_faves:200'] },
+      { id: 'zh', name: '中文', hint: '中文圈热门讨论', queries: ['大模型 lang:zh min_faves:50', '(开源 OR 编程) lang:zh min_faves:50', '科技 lang:zh min_faves:100'] },
+    ];
 
     const dot = (ok) => ({      display: 'inline-block',
       width: 7,
@@ -132,6 +145,31 @@ window.__ModuleLoader__.load({
       const [authCode, setAuthCode] = useState('');
       const [prompt, setPrompt] = useState('');
       const [history, setHistory] = useState(null);
+      const [presets, setPresets] = useState(PRESETS);
+      const [picked, setPicked] = useState([]);
+      const [tab, setTab] = useState('basic');
+      /** 非当前页的卡片直接隐藏（比拆组件省事，也不会丢状态） */
+      const vis = (id) => ({ display: tab === id ? undefined : 'none' });
+
+      /** 勾/取消一个分区：合并关键词，并**立即保存**（否则一刷新就没了）。 */
+      const togglePreset = (id) => {
+        const next = picked.includes(id) ? picked.filter((x) => x !== id) : [...picked, id];
+        setPicked(next);
+        const queries = next.flatMap((pid) => (PRESETS.find((p) => p.id === pid)?.queries ?? []));
+        const wantsPolitics = next.includes('politics');
+        const searchQueries = queries.join(',');
+
+        setForm((prev) => ({
+          ...prev,
+          searchQueries,
+          filterPolitics: wantsPolitics ? false : prev.filterPolitics,
+        }));
+
+        // 立刻落盘，刷新后勾选状态还在
+        const body = { presets: next.join(','), searchQueries };
+        if (wantsPolitics) body.filterPolitics = 'false';
+        call('/config', { method: 'POST', body }).catch((err) => setMessage(`保存分区失败：${err.message}`));
+      };
       const [message, setMessage] = useState('');
       const [busy, setBusy] = useState(false);
       const [result, setResult] = useState(null);
@@ -150,6 +188,8 @@ window.__ModuleLoader__.load({
           if (promptRes?.text) setPrompt(promptRes.text);
           const hist = await call('/history?limit=30').catch(() => null);
           if (hist) setHistory(hist);
+          const pre = await call('/presets').catch(() => null);
+          if (pre?.presets?.length) setPresets(pre.presets);
           if (data.config) {
             setForm({
               watchHandles: data.config.watchHandles ?? '',
@@ -160,10 +200,23 @@ window.__ModuleLoader__.load({
               searchQueries: data.config.searchQueries ?? '',
               searchProduct: data.config.searchProduct ?? 'Top',
               searchMinLikes: String(data.config.searchMinLikes ?? 100),
+              visionInDigest: Boolean(data.config.visionInDigest),
+              visionMaxImages: String(data.config.visionMaxImages ?? 6),
+              visionVideo: data.config.visionVideo !== false,
+              visionMaxVideos: String(data.config.visionMaxVideos ?? 1),
               mentionWatch: Boolean(data.config.mentionWatch),
               mentionPollMinutes: String(data.config.mentionPollMinutes ?? 5),
               mentionWhitelist: data.config.mentionWhitelist ?? '',
+              filterPolitics: data.config.filterPolitics !== false,
             });
+            // 反推当前关键词对应了哪些分区（用于回显勾选状态）
+            const saved = String(data.config.presets ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+            const qsNow = String(data.config.searchQueries ?? '');
+            setPicked(
+              saved.length
+                ? saved.filter((id) => PRESETS.some((p) => p.id === id))
+                : PRESETS.filter((p) => p.queries.every((q) => qsNow.includes(q.trim()))).map((p) => p.id),
+            );
           }
         } catch (err) {
           setMessage(`读取失败：${err.message}`);
@@ -180,7 +233,7 @@ window.__ModuleLoader__.load({
         setBusy(true);
         setMessage('');
         try {
-          const res = await call('/config', { method: 'POST', body: form });
+          const res = await call('/config', { method: 'POST', body: { ...form, presets: picked.join(',') } });
           setMessage(res?.changed?.length ? `配置已保存：${res.changed.join('、')}` : '配置没有变化');
           await load();
         } catch (err) {
@@ -289,6 +342,19 @@ window.__ModuleLoader__.load({
       const online = Boolean(state?.online);
       const config = state?.config;
 
+      /** 状态栏里的"在刷什么"要跟着来源类型走，不能永远显示关注账号。 */
+      const sourceLabel = (() => {
+        const src = config?.source ?? 'handles';
+        if (src === 'search') {
+          const ids = String(config?.presets ?? '').split(',').filter(Boolean);
+          const names = ids.map((id) => PRESETS.find((p) => p.id === id)?.name ?? id);
+          const n = String(config?.searchQueries ?? '').split(',').filter(Boolean).length;
+          return names.length ? `在刷：${names.join('/')}（${n} 组关键词）` : `在刷：${n} 组关键词`;
+        }
+        if (src === 'home') return '在刷：首页推荐流';
+        return `在刷：${config?.watchHandles || '（没配）'}`;
+      })();
+
       return h(
         'div',
         { style: { maxWidth: 620, padding: '4px 2px' } },
@@ -298,7 +364,7 @@ window.__ModuleLoader__.load({
           { style: { ...S.row, marginBottom: 10 } },
           h('span', { style: { fontSize: 13 } }, h('span', { style: dot(online) }), online ? '服务在线' : '服务离线'),
           config
-            ? h('span', { style: S.hint }, `在刷：${config.watchHandles || '（没配）'} · 已记录 ${state?.state?.seen ?? 0} 条`)
+            ? h('span', { style: S.hint }, `${sourceLabel} · 已记录 ${state?.state?.seen ?? 0} 条`)
             : null,
           h('button', { style: S.btn, onClick: load, disabled: busy }, '刷新'),
         ),
@@ -308,11 +374,45 @@ window.__ModuleLoader__.load({
           creds?.canPost ? `发推身份：@${creds.actingAs || '已授权'}` : '发推凭据：未就绪',
         ),
 
+        // ── 分页导航 ──
+        h(
+          'div',
+          { style: { display: 'flex', gap: 4, flexWrap: 'wrap', borderBottom: '1px solid var(--dsh-border, #e5e7eb)', marginBottom: 16 } },
+          ...[
+            ['basic', '摘要'],
+            ['mention', '监听'],
+            ['vision', '看图'],
+            ['history', '记录'],
+            ['prompt', '风格'],
+            ['creds', '凭据'],
+          ].map(([id, label]) =>
+            h(
+              'button',
+              {
+                key: id,
+                onClick: () => setTab(id),
+                style: {
+                  border: 'none',
+                  background: 'none',
+                  cursor: 'pointer',
+                  padding: '8px 14px',
+                  fontSize: 13,
+                  fontWeight: tab === id ? 600 : 400,
+                  color: tab === id ? '#2563eb' : 'inherit',
+                  borderBottom: tab === id ? '2px solid #2563eb' : '2px solid transparent',
+                  marginBottom: -1,
+                },
+              },
+              label,
+            ),
+          ),
+        ),
+
         // ── 配置 ──
         form
           ? h(
               'div',
-              null,
+              { style: vis('basic') },
               // 内容来源：关注账号 / 关键词搜索
               h(
                 'div',
@@ -372,6 +472,41 @@ window.__ModuleLoader__.load({
                     h(
                       'div',
                       { style: S.field },
+                      h('label', { style: S.label }, '快速选区（可多选，选中的分区关键词自动合并）'),
+                      h(
+                        'div',
+                        { style: { display: 'flex', flexWrap: 'wrap', gap: '10px 18px', fontSize: 13, padding: '4px 0' } },
+                        (presets.length ? presets : PRESETS).map((p) => {
+                          const on = picked.includes(p.id);
+                          return h(
+                            'label',
+                            {
+                              key: p.id,
+                              title: p.queries.join(' | '),
+                              style: {
+                                display: 'flex',
+                                gap: 6,
+                                alignItems: 'center',
+                                cursor: 'pointer',
+                                padding: '4px 10px',
+                                borderRadius: 6,
+                                border: `1px solid ${on ? '#3b82f6' : 'var(--dsh-border, #e5e7eb)'}`,
+                                background: on ? 'rgba(59,130,246,0.08)' : 'transparent',
+                              },
+                            },
+                            h('input', {
+                              type: 'checkbox',
+                              checked: on,
+                              onChange: () => togglePreset(p.id),
+                            }),
+                            p.name,
+                          );
+                        }),
+                      ),
+                    ),
+                    h(
+                      'div',
+                      { style: S.field },
                       h('label', { style: S.label }, '关键词（逗号分隔；支持 X 搜索语法，如 "AI agent -filter:replies"）'),
                       h('input', {
                         style: S.input,
@@ -413,8 +548,19 @@ window.__ModuleLoader__.load({
                     ),
                     h(
                       'div',
-                      { style: { ...S.hint, marginBottom: 14 } },
+                      { style: { ...S.hint, marginBottom: 10 } },
                       '最低赞数会自动拼成 min_faves:N。实测 100 能挡掉绝大部分打卡和推广帖；嫌少可以调到 50，嫌杂调到 300。',
+                    ),
+                    h(
+                      'label',
+                      { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 13, marginBottom: 14 } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: form.filterPolitics,
+                        onChange: (e) => setForm({ ...form, filterPolitics: e.target.checked }),
+                      }),
+                      '过滤政治类内容',
+                      h('span', { style: S.hint }, '（勾选「政治」分区会自动关掉）'),
                     ),
                   )
                 : h(
@@ -483,7 +629,7 @@ window.__ModuleLoader__.load({
         form
           ? h(
               'div',
-              { style: S.card },
+              { style: { ...S.card, ...vis('mention') } },
               h(
                 'div',
                 { style: S.cardTitle },
@@ -578,7 +724,7 @@ window.__ModuleLoader__.load({
         // ── 接入凭据 ──
         h(
           'div',
-          { style: S.card },
+          { style: { ...S.card, ...vis('creds') } },
           h(
             'div',
             { style: S.cardTitle },
@@ -682,10 +828,107 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        // ── 看图 ──
+        form
+          ? h(
+              'div',
+              { style: { ...S.card, ...vis('vision') } },
+              h(
+                'div',
+                { style: S.cardTitle },
+                '看图',
+                h(
+                  'span',
+                  { style: S.badge(Boolean(state?.config?.visionReady)) },
+                  state?.config?.visionReady ? `已配置 ${state.config.visionModel ?? ''}` : '未配置',
+                ),
+              ),
+              h(
+                'div',
+                { style: { ...S.hint, marginBottom: 12 } },
+                'DeepSeek 的 API 不支持图像，所以另配一个视觉模型。你 @ 它并问图时，会先看图再回答。',
+              ),
+              h(
+                'div',
+                { style: { display: 'flex', gap: 18, alignItems: 'flex-end' } },
+                h(
+                  'div',
+                  { style: { ...S.field, flex: 1 } },
+                  h('label', { style: S.label }, '定时摘要时也看图'),
+                  h(
+                    'label',
+                    { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: form.visionInDigest,
+                      onChange: (e) => setForm({ ...form, visionInDigest: e.target.checked }),
+                    }),
+                    form.visionInDigest ? '开启（判断推文时把配图内容也算进去）' : '关闭（只看文字）',
+                  ),
+                ),
+                h(
+                  'div',
+                  { style: { ...S.field, width: 150, marginBottom: 0 } },
+                  h('label', { style: S.label }, '每轮最多看几张'),
+                  h('input', {
+                    style: S.input,
+                    type: 'number',
+                    min: 0,
+                    max: 20,
+                    value: form.visionMaxImages,
+                    onChange: (e) => setForm({ ...form, visionMaxImages: e.target.value }),
+                  }),
+                ),
+              ),
+              h(
+                'div',
+                { style: { display: 'flex', gap: 18, alignItems: 'flex-end', marginTop: 12 } },
+                h(
+                  'div',
+                  { style: { ...S.field, flex: 1 } },
+                  h('label', { style: S.label }, '识别视频'),
+                  h(
+                    'label',
+                    { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 } },
+                    h('input', {
+                      type: 'checkbox',
+                      checked: form.visionVideo,
+                      onChange: (e) => setForm({ ...form, visionVideo: e.target.checked }),
+                    }),
+                    form.visionVideo ? '开启（抽帧后交给视觉模型）' : '关闭（只看封面）',
+                  ),
+                ),
+                h(
+                  'div',
+                  { style: { ...S.field, width: 150, marginBottom: 0 } },
+                  h('label', { style: S.label }, '每轮最多看几条'),
+                  h('input', {
+                    style: S.input,
+                    type: 'number',
+                    min: 0,
+                    max: 5,
+                    value: form.visionMaxVideos,
+                    onChange: (e) => setForm({ ...form, visionMaxVideos: e.target.value }),
+                  }),
+                ),
+              ),
+              h(
+                'div',
+                { style: { ...S.hint, marginTop: 10 } },
+                '视频会先下载再用 ffmpeg 抽 4 帧，交给视觉模型总结——一条约 20–40 秒。',
+              ),
+              h(
+                'div',
+                { style: { ...S.row, marginTop: 12, marginBottom: 0 } },
+                h('button', { style: { ...S.btn, ...S.btnPrimary }, onClick: save, disabled: busy }, '保存'),
+              ),
+            )
+          : null,
+
         // ── 刷过的推文 ──
         h(
           'div',
-          { style: S.card },
+          { style: { ...S.card, ...vis('history') } },
           h(
             'div',
             { style: S.cardTitle },
@@ -725,7 +968,7 @@ window.__ModuleLoader__.load({
         // ── 说话风格（提示词）──
         h(
           'div',
-          { style: S.card },
+          { style: { ...S.card, ...vis('prompt') } },
           h('div', { style: S.cardTitle }, '说话风格（别人 @ 它时怎么回）'),
           h(
             'div',
@@ -763,3 +1006,8 @@ window.__ModuleLoader__.load({
     };
   },
 });
+
+
+
+
+

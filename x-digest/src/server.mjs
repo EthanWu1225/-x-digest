@@ -14,6 +14,7 @@ import { savePending, loadPending } from './oauth-auth.mjs';
 import { saveTokens, tokensFile, loadTokens } from './tokens.mjs';
 import { processMentions, readReplyPrompt, promptFile } from './mentions.mjs';
 import { loadHistory } from './history.mjs';
+import { listPresets } from './presets.mjs';
 
 /** 只显示尾部几位，确认"填过没有"而不泄露。 */
 const tail = (s) => (s ? `…${String(s).slice(-4)}` : '');
@@ -46,6 +47,15 @@ function saveEnvPatch(cfg, patch = {}) {
   }
   if (Object.hasOwn(patch, 'searchProduct')) cfg.searchProduct = String(patch.searchProduct);
   if (Object.hasOwn(patch, 'searchMinLikes')) cfg.searchMinLikes = Number(patch.searchMinLikes) || cfg.searchMinLikes;
+  if (Object.hasOwn(patch, 'presets')) {
+    cfg.presets = String(patch.presets ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  }
+  if (Object.hasOwn(patch, 'visionInDigest')) cfg.visionInDigest = String(patch.visionInDigest).toLowerCase() === 'true';
+  if (Object.hasOwn(patch, 'visionMaxImages')) cfg.visionMaxImages = Number(patch.visionMaxImages) || cfg.visionMaxImages;
+  if (Object.hasOwn(patch, 'filterPolitics')) cfg.filterPolitics = String(patch.filterPolitics).toLowerCase() === 'true';
+  if (Object.hasOwn(patch, 'visionVideo')) cfg.visionVideo = String(patch.visionVideo).toLowerCase() === 'true';
+  if (Object.hasOwn(patch, 'visionMaxVideos')) cfg.visionMaxVideos = Number(patch.visionMaxVideos);
+  if (Object.hasOwn(patch, 'visionVideoFrames')) cfg.visionVideoFrames = Number(patch.visionVideoFrames) || cfg.visionVideoFrames;
 
   if (Object.hasOwn(patch, 'watchHandles')) {    cfg.handles = String(patch.watchHandles ?? '')
       .split(',')
@@ -184,6 +194,15 @@ export function startServer(cfg, logger) {
           searchQueries: cfg.searchQueries.join(','),
           searchProduct: cfg.searchProduct,
           searchMinLikes: cfg.searchMinLikes,
+          presets: cfg.presets.join(','),
+          visionInDigest: cfg.visionInDigest,
+          visionMaxImages: cfg.visionMaxImages,
+          visionModel: cfg.vision.model,
+          visionReady: Boolean(cfg.vision.apiKey),
+          filterPolitics: cfg.filterPolitics,
+          visionVideo: cfg.visionVideo,
+          visionMaxVideos: cfg.visionMaxVideos,
+          visionVideoFrames: cfg.visionVideoFrames,
           watchHandles: cfg.handles.join(','),
           targetHandle: cfg.targetHandle,
           postMode: cfg.postMode,
@@ -345,6 +364,11 @@ export function startServer(cfg, logger) {
       if (pathname === '/interests' && req.method === 'GET') {        return json(res, 200, { text: readInterests(cfg) });
       }
 
+      // —— 分区预设 ——
+      if (pathname === '/presets' && req.method === 'GET') {
+        return json(res, 200, { presets: listPresets() });
+      }
+
       // —— 回复提示词（说话风格）——
       if (pathname === '/prompt' && req.method === 'GET') {
         return json(res, 200, { text: readReplyPrompt(cfg), file: promptFile(cfg) });
@@ -502,4 +526,10 @@ export function startServer(cfg, logger) {
 
   return { server, close, run };
 }
+
+
+
+
+
+
 

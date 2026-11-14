@@ -14,6 +14,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadSessionFromFile } from './xsession.mjs';
 import { launchContext, replyToTweet, closeContext } from './browser.mjs';
+import { describeImage, describeVideo, visionReady } from './vision.mjs';
 
 const DEFAULT_PROMPT = `你在替一个技术型博主打理 X（推特）。有人 @ 了他，写一句回复。
 
@@ -108,6 +109,8 @@ export function extractMentions(body, selfHandle) {
       handle: handle || '',
       text: String(tweet.full_text ?? tweet.text ?? ''),
       createdAt: Number(tweet.created_at) || Date.parse(tweet.created_at ?? '') || 0,
+      // 这条 @ 是在回复谁 —— 拿它能补上"这/它"指向的上下文
+      inReplyTo: String(tweet.in_reply_to_status_id_str ?? ''),
       url: `https://x.com/${handle || 'i'}/status/${id}`,
     };
   }
@@ -131,7 +134,7 @@ export async function fetchMentions(cfg, session) {
 }
 
 /** 让 DeepSeek 写一句回复。 */
-export async function draftReply(cfg, mention) {
+export async function draftReply(cfg, mention, { parentText = '' } = {}) {
   const res = await fetch(`${cfg.deepseek.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.deepseek.apiKey}` },
@@ -143,7 +146,17 @@ export async function draftReply(cfg, mention) {
         { role: 'system', content: readReplyPrompt(cfg) },
         {
           role: 'user',
-          content: `@${mention.handle} 说：${mention.text.slice(0, 500)}\n\n（原推：${mention.url}）\n\n请给出回复：`,
+          content: [
+            parentText
+              ? `他回复的那条推文（也就是"这/它"指的是）：\n${parentText.slice(0, 500)}\n`
+              : '（他没有引用别的推文，就是单独 @ 你）\n',
+            `他说：${mention.text.slice(0, 500)}`,
+            '',
+            '写一句回复。注意：',
+            '- 如果上面有原推内容，就接着原推的主题回，别问"你要我看什么"',
+            '- 如果确实什么信息都没有（只有一句空泛的 @），就只输出 SKIP 四个字母，表示这轮不回',
+            '- 只输出回复正文或 SKIP，不要解释',
+          ].join('\n'),
         },
       ],
     }),
@@ -152,7 +165,9 @@ export async function draftReply(cfg, mention) {
   const raw = await res.text();
   if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}: ${raw.slice(0, 200)}`);
   const text = JSON.parse(raw)?.choices?.[0]?.message?.content ?? '';
-  return text.trim().replace(/^["'「]|["'」]$/g, '').slice(0, 200);
+  const cleaned = text.trim().replace(/^["'「]|["'」]$/g, '');
+  if (/^SKIP$/i.test(cleaned)) return '';
+  return cleaned.slice(0, 200);
 }
 
 /**
@@ -191,11 +206,61 @@ export async function processMentions(cfg, logger = console) {
 
   // 一轮只回一条，避免一次性刷屏
   const target = fresh[0];
+
+  // 如果这条 @ 是在回复别人的推，先把原推内容取出来 ——
+  // 否则模型只看到"这是什么"，只能回"我看不到"（这就是之前的 bug）
+  let parentText = '';
+  let parentImages = [];
+  let parentVideo = '';
+  if (target.inReplyTo) {
+    try {
+      const session = loadSessionFromFile(cfg);
+      const conv = await session.conversation(target.inReplyTo);
+      parentText = conv.root?.text ?? '';
+      parentImages = conv.root?.images ?? [];
+      parentVideo = conv.root?.videoUrl ?? '';
+      if (parentText) logger.info?.(`取到原推上下文：${parentText.slice(0, 60)}…`);
+    } catch (err) {
+      logger.warn?.(`取原推失败（将按无上下文处理）：${err.message}`);
+    }
+  }
+
+  // 原推带图 → 让视觉模型先说一句图里是什么，再交给回复模型
+  if (parentImages.length && visionReady(cfg)) {
+    try {
+      const desc = await describeImage(parentImages[0], cfg);
+      parentText += `\n[配图内容] ${desc}`;
+      logger.info?.(`看图：${desc.slice(0, 60)}…`);
+    } catch (err) {
+      logger.warn?.(`看图失败（不影响回复）：${err.message}`);
+    }
+  } else if (parentVideo && visionReady(cfg) && cfg.visionVideo) {
+    try {
+      const desc = await describeVideo(parentVideo, cfg, { maxFrames: cfg.visionVideoFrames });
+      parentText += `\n[视频内容] ${desc}`;
+      logger.info?.(`看视频：${desc.slice(0, 50)}…`);
+    } catch (err) {
+      logger.warn?.(`视频识别失败（不影响回复）：${err.message}`);
+    }
+  } else if (parentImages.length && !visionReady(cfg)) {
+    logger.info?.('原推带图，但没有配置视觉模型，跳过图内容');
+  }
+
   let text;
   try {
-    text = await draftReply(cfg, target);
+    text = await draftReply(cfg, target, { parentText });
   } catch (err) {
     result.details.push(`生成回复失败：${err.message}`);
+    return result;
+  }
+
+  if (!text) {
+    state.handled[target.id] = { at: Date.now(), handle: target.handle, text: '', skipped: true };
+    state.lastCheck = Date.now();
+    writeJson(mentionsStateFile(cfg), state);
+    result.skipped += 1;
+    result.details.push(`跳过 @${target.handle}：信息不足，没有可回的内容`);
+    logger.info?.(`跳过 @${target.handle}（模型判断没有上下文可回）`);
     return result;
   }
 
@@ -221,4 +286,7 @@ export async function processMentions(cfg, logger = console) {
 }
 
 export { mentionsStateFile };
+
+
+
 

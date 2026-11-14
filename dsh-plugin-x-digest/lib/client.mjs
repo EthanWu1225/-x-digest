@@ -204,6 +204,11 @@ export class XDigestClient {
     return this.#request(`/history?limit=${encodeURIComponent(limit)}`);
   }
 
+  /** 分区预设（X 没有垂类分区，用调好的关键词组代替）。 */
+  async presets() {
+    return this.#request('/presets');
+  }
+
   async health() {
     return this.#request('/health', { auth: false });
   }

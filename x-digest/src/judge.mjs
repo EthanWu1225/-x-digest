@@ -12,6 +12,8 @@ const SYSTEM = `你是一个人的私人 X（推特）信息筛选官。
 只输出 JSON，不要任何解释、不要 markdown 代码块：
 {"picks":[{"id":"<推文id>","score":85,"reason":"20字以内，说清为什么值得他看"}]}
 
+**只输出 id / score / reason 三个字段，绝对不要复制推文原文。**
+
 最多输出 maxPicks 条，按 score 从高到低。`;
 
 function stripFence(text) {
@@ -20,6 +22,23 @@ function stripFence(text) {
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/\s*```$/, '')
     .trim();
+}
+
+/**
+ * 从被截断的 JSON 里抢救 picks。
+ * 模型的输出长这样：{"picks":[{"id":"123","score":85,"reason":"…"},…
+ * 哪怕最后一段被切掉，前面的条目仍然可用。
+ */
+function salvagePicks(text) {
+  const picks = [];
+  for (const chunk of String(text).split(/"id"\s*:\s*"/).slice(1)) {
+    const id = /^(\d{5,25})/.exec(chunk)?.[1];
+    if (!id) continue;
+    const score = Number(/"score"\s*:\s*(-?\d+)/.exec(chunk)?.[1] ?? 0);
+    const reason = /"reason"\s*:\s*"((?:[^"\\]|\\.){0,120})"/.exec(chunk)?.[1] ?? '';
+    picks.push({ id, score: Number.isFinite(score) ? score : 0, reason });
+  }
+  return picks;
 }
 
 /**
@@ -35,11 +54,18 @@ export async function judge(candidates, cfg, interests) {
     text: c.text.slice(0, 420),
     likes: c.likes,
     reposts: c.reposts,
+    // 带图的推文会先被视觉模型描述一遍，判断时一起看
+    ...(c.imageDesc ? { image: c.imageDesc.slice(0, 300) } : {}),
+    ...(c.videoDesc ? { video: c.videoDesc.slice(0, 400) } : {}),
+    // 命中敏感词的推文不直接丢，把标签带过来让模型结合语境判断
+    ...(c.sensitiveTags?.length ? { sensitive: c.sensitiveTags.join('/') } : {}),
   }));
 
   const user = [
     `我关注的账号最新推文如下（JSON 数组）：`,
     JSON.stringify(payload),
+    '',
+    payload.some((p) => p.image) ? '说明：部分推文带 image 字段，那是配图内容的文字描述，判断时请一并参考。' : '',
     '',
     `我的兴趣描述：`,
     interests.trim() || '（未填写，请按"AI/技术/产品/开源"这类通用高价值标准判断）',
@@ -58,7 +84,7 @@ export async function judge(candidates, cfg, interests) {
       body: JSON.stringify({
         model: cfg.deepseek.model,
         temperature: 0.2,
-        max_tokens: 800,
+        max_tokens: 1200,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: SYSTEM },
@@ -87,7 +113,12 @@ export async function judge(candidates, cfg, interests) {
   try {
     parsed = JSON.parse(stripFence(content));
   } catch {
-    return { picks: [], error: `模型输出无法解析：${String(content).slice(0, 200)}` };
+    // 模型偶尔会把输出截断（或被 max_tokens 切掉），从残片里抢救出 id/score/reason
+    const salvaged = salvagePicks(content);
+    if (!salvaged.length) {
+      return { picks: [], error: `模型输出无法解析：${String(content).slice(0, 200)}` };
+    }
+    parsed = { picks: salvaged };
   }
 
   const byId = new Map(candidates.map((c) => [c.id, c]));
@@ -106,3 +137,4 @@ export async function judge(candidates, cfg, interests) {
 
   return { picks };
 }
+

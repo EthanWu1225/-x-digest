@@ -6,8 +6,54 @@ import { loadState, saveState, pruneState, markSeen, newCandidates } from './sta
 import { latestTweet, latestTweetId, postTweet } from './xpost.mjs';
 import { loadSessionFromFile } from './xsession.mjs';
 import { launchContext, replyToTweet, closeContext } from './browser.mjs';
-import { checkSensitive, SAFE_RULE } from './safety.mjs';
+import { checkSensitive, safeRule } from './safety.mjs';
 import { recordHistory } from './history.mjs';
+import { describeImage, describeVideo, visionReady } from './vision.mjs';
+
+/**
+ * 给「带图的候选推文」看图，把描述挂到 item.imageDesc 上。
+ * 只挑赞数最高的几张，控制时间和成本（每次最多 cfg.visionMaxImages 张）。
+ */
+async function enrichImages(cfg, candidates, log) {
+  if (!cfg.visionInDigest || !visionReady(cfg)) return;
+
+  const targets = candidates
+    .filter((c) => c.images?.length)
+    .sort((a, b) => b.likes - a.likes)
+    .slice(0, cfg.visionMaxImages);
+
+  if (!targets.length) return;
+  log.info(`给 ${targets.length} 条带图推文看图…`);
+
+  // 三张一组并发，避免一条卡住整轮
+  for (let i = 0; i < targets.length; i += 3) {
+    await Promise.allSettled(
+      targets.slice(i, i + 3).map(async (c) => {
+        c.imageDesc = await describeImage(c.images[0], cfg);
+      }),
+    );
+  }
+
+  const ok = targets.filter((t) => t.imageDesc).length;
+  log.info(`看图完成 ${ok}/${targets.length}`);
+
+  // 视频：抽帧成本高（下载 + 抽帧 + 多图），每轮只处理赞数最高的几条
+  if (!cfg.visionVideo) return;
+  const videos = candidates
+    .filter((c) => c.videoUrl && !c.videoDesc)
+    .sort((a, b) => b.likes - a.likes)
+    .slice(0, cfg.visionMaxVideos);
+
+  for (const c of videos) {
+    try {
+      log.info(`识别视频 @${c.handle}…`);
+      c.videoDesc = await describeVideo(c.videoUrl, cfg, { maxFrames: cfg.visionVideoFrames });
+      log.info(`视频完成 @${c.handle}：${c.videoDesc.slice(0, 40)}…`);
+    } catch (err) {
+      log.warn(`视频识别失败 @${c.handle}：${err.message.slice(0, 80)}`);
+    }
+  }
+}
 
 /** 把挑中的推文记进「刷过的推文」（干跑/发送/失败都要留痕）。 */
 function rememberPicks(cfg, picks, action, detail = '') {
@@ -149,23 +195,28 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
     .slice(0, cfg.maxCandidates);
   result.candidates = candidates.length;
 
-  // 敏感内容预筛：挡在模型前面，并记进"刷过的推文"里（标成 sensitive）
+  // 敏感内容：只有"硬拦截"才丢弃；软信号打标签交给模型结合语境判断
+  // （曾经的 bug：一条讨论"是否软色情"的推文因为含关键词被误杀）
   const safeCandidates = [];
   for (const item of candidates) {
     const check = checkSensitive(item, cfg);
-    if (check.sensitive) {
-      result.errors.push(`已过滤敏感内容 @${item.handle}（命中「${check.matched}」）`);
-      recordHistory(cfg, {
-        id: item.id,
-        handle: item.handle,
-        text: item.text,
-        url: item.url,
-        reason: `命中敏感词「${check.matched}」`,
-        action: 'sensitive',
-      });
+
+    if (check.hard) {
+      result.errors.push(`已拦截 @${item.handle}（命中「${check.hard}」）`);
+      recordHistory(cfg, { id: item.id, handle: item.handle, text: item.text, url: item.url, reason: `命中硬拦截词「${check.hard}」`, action: 'sensitive' });
       state.seen[item.id] = Date.now();
       continue;
     }
+
+    const tags = [...check.soft];
+    if (check.politics && cfg.filterPolitics !== false) tags.push('政治');
+
+    if (tags.length) {
+      // 不丢弃，交给模型判断：讨论/批评不算违规
+      item.sensitiveTags = tags;
+      recordHistory(cfg, { id: item.id, handle: item.handle, text: item.text, url: item.url, reason: `含敏感词（${tags.join('/')}），交给模型判断`, action: 'flagged' });
+    }
+
     safeCandidates.push(item);
   }
 
@@ -189,7 +240,9 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   }
 
   log.info(`新推文 ${candidates.length} 条，交给 DeepSeek 判断…`);
-  const { picks, error } = await judge(candidates, cfg, `${readInterests(cfg)}\n\n${SAFE_RULE}`);
+  await enrichImages(cfg, candidates, log);
+
+  const { picks, error } = await judge(candidates, cfg, `${readInterests(cfg)}\n\n${safeRule(cfg)}`);
   if (error) {
     result.errors.push(error);
     log.error(error);
@@ -288,9 +341,13 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
         log.info(`用官方 API 发送（身份：${cfg.actingAs ?? '来自 .env 的 token'}）`);
         posted = await postTweet(cfg, text, { replyTo });
       } catch (err) {
-        const noCredit = /402|credits/i.test(err.message);
-        if (!(cfg.postTransport === 'auto' && noCredit)) throw err;
-        log.warn('API 额度不足，改用浏览器发送');
+        // auto 模式下任何 API 失败都回退浏览器：
+        // 402（没额度）、401（token 过期且刷新失败）、429（限流）都不该让整轮失败
+        if (cfg.postTransport === 'auto') {
+          log.warn(`API 发送失败（${err.message.slice(0, 80)}…），改用浏览器`);
+        } else {
+          throw err;
+        }
       }
     }
 
@@ -299,7 +356,11 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
       log.info(`用浏览器打开 ${targetUrl} 并回复…`);
       const context = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
       try {
-        const res = await replyToTweet(context, targetUrl, text);
+        // 兜底超时：浏览器偶尔会卡在页面加载/选择器上，卡住会一直占着"上一轮还在跑"的锁
+        const res = await Promise.race([
+          replyToTweet(context, targetUrl, text),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（180 秒）')), 180_000)),
+        ]);
         posted = { id: '', via: 'browser', screenshot: res?.screenshot ?? '' };
         log.info(`浏览器发送完成${res?.screenshot ? `，截图：${res.screenshot}` : ''}`);
       } finally {
@@ -328,5 +389,10 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
+
+
+
+
 
 

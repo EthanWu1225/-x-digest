@@ -1,0 +1,28 @@
+services:
+  x-digest:
+    build: .
+    image: x-digest:latest
+    container_name: x-digest
+    restart: unless-stopped
+    ports:
+      # 只绑本机，不对外暴露；需要远程看就改成 "8788:8788" 并自己加鉴权
+      - '127.0.0.1:8788:8788'
+    env_file:
+      - .env
+    environment:
+      # 国内机器走代理时在这里覆盖，例如 http://host.docker.internal:7897
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: api.deepseek.com,dashscope.aliyuncs.com,localhost,127.0.0.1
+      NODE_USE_ENV_PROXY: '1'
+      BROWSER_EXECUTABLE: /usr/bin/chromium
+      BROWSER_HEADLESS: 'true'
+    volumes:
+      # 登录态、记忆、日志都在 data/，容器重建不丢
+      - ./data:/app/data
+      - ./prompts:/app/prompts
+      - ./interests.md:/app/interests.md
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
