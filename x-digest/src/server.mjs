@@ -73,6 +73,7 @@ function saveEnvPatch(cfg, patch = {}) {
   if (Object.hasOwn(patch, 'pollIntervalMinutes')) cfg.pollIntervalMinutes = Number(patch.pollIntervalMinutes) || cfg.pollIntervalMinutes;
   if (Object.hasOwn(patch, 'mentionWatch')) cfg.mentionWatch = String(patch.mentionWatch).toLowerCase() === 'true';
   if (Object.hasOwn(patch, 'mentionPollMinutes')) cfg.mentionPollMinutes = Number(patch.mentionPollMinutes) || cfg.mentionPollMinutes;
+  if (Object.hasOwn(patch, 'mentionMaxPerCycle')) cfg.mentionMaxPerCycle = Number(patch.mentionMaxPerCycle) || cfg.mentionMaxPerCycle;
   if (Object.hasOwn(patch, 'mentionWhitelist')) {
     const list = String(patch.mentionWhitelist ?? '')
       .split(',')
@@ -214,6 +215,7 @@ export function startServer(cfg, logger) {
           pollIntervalMinutes: cfg.pollIntervalMinutes,
           mentionWatch: cfg.mentionWatch,
           mentionPollMinutes: cfg.mentionPollMinutes,
+          mentionMaxPerCycle: cfg.mentionMaxPerCycle,
           mentionWhitelist: cfg.mentionWhitelist.join(','),
           actingAs: cfg.actingAs ?? '',
           canPost: cfg.canPost,
@@ -528,6 +530,7 @@ export function startServer(cfg, logger) {
 
   return { server, close, run };
 }
+
 
 
 

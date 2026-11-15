@@ -116,63 +116,185 @@ export async function isLoggedIn(context) {
 }
 
 /**
+ * 无状态浏览器：不落盘、不用 profile，直接把小号的 cookie 注入进去。
+ *
+ * 为什么不用 launchPersistentContext：
+ *   那个 125MB 的 profile 在 Windows 上启动很不稳定（实测 38s 到 180s 超时都有），
+ *   而且不能并发。发回复只需要"已登录"，cookie( auth_token + ct0 ) 就够了。
+ */
+export async function launchStateless(cfg) {
+  const { readFileSync } = await import('node:fs');
+  let cookies = {};
+  try {
+    cookies = JSON.parse(readFileSync(cfg.session.cookiesFile, 'utf8'));
+  } catch {
+    /* 没有就按未登录跑，页面会提示 */
+  }
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: cfg.browserHeadless !== false,
+      ...launchTarget(),
+      args: ['--no-first-run', '--no-default-browser-check', '--disable-blink-features=AutomationControlled'],
+    });
+  } catch (err) {
+    throw new BrowserError(`启动浏览器失败：${err.message}`);
+  }
+
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900 },
+    locale: 'zh-CN',
+  });
+
+  if (cookies.auth_token && cookies.ct0) {
+    await context.addCookies([
+      { name: 'auth_token', value: cookies.auth_token, domain: '.x.com', path: '/', httpOnly: true, secure: true },
+      { name: 'ct0', value: cookies.ct0, domain: '.x.com', path: '/', secure: true },
+      { name: 'auth_token', value: cookies.auth_token, domain: '.twitter.com', path: '/', httpOnly: true, secure: true },
+      { name: 'ct0', value: cookies.ct0, domain: '.twitter.com', path: '/', secure: true },
+    ]);
+  }
+
+  context.__browser = browser; // 关的时候一起关
+  return context;
+}
+
+/** 发回复前先确认 x.com 能连上：连不上就立刻报错，别让浏览器干等到超时。 */
+async function ensureReachable() {
+  try {
+    const res = await fetch('https://x.com/robots.txt', {
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; x-digest/0.1)' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    throw new BrowserError(`连不上 x.com（${err.message}）——先检查代理是否开着`);
+  }
+}
+
+/**
+ * 复用同一个浏览器上下文（省掉每条回复都重启浏览器的十几秒）。
+ * 空闲 10 分钟后自动关闭，不长期占内存。
+ */
+let sharedCtx = null;
+let idleTimer = null;
+
+export async function withContext(cfg, fn) {
+  await ensureReachable();
+  if (!sharedCtx) {
+    sharedCtx = await launchStateless(cfg);
+  }
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    const dying = sharedCtx;
+    sharedCtx = null;
+    closeContext(dying);
+  }, 600_000); // 保活 10 分钟：@ 每 5 分钟一轮，别每轮都冷启动
+  idleTimer.unref?.();
+
+  try {
+    return await fn(sharedCtx);
+  } catch (err) {
+    const dying = sharedCtx;
+    sharedCtx = null;
+    await closeContext(dying);
+    throw err;
+  }
+}
+
+export async function shutdownSharedContext() {
+  const dying = sharedCtx;
+  sharedCtx = null;
+  if (idleTimer) clearTimeout(idleTimer);
+  await closeContext(dying);
+}
+
+/**
  * 在指定推文下回复。
  * @param {import('playwright-core').BrowserContext} context
  * @param {string} tweetUrl
  * @param {string} text
- * @param {{ dry?: boolean }} opts dry=true 时只填不点发送
+ * @param {{ dry?: boolean, fast?: boolean }} opts
+ *        fast=true 时屏蔽图片/视频/字体请求、缩小等待，用于"只需要发出文字"的场合
  */
 export async function replyToTweet(context, tweetUrl, text, { dry = false, fast = false } = {}) {
-  const page = context.pages()[0] ?? (await context.newPage());
-  await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(fast ? 1800 : 3500);
+  const page = await context.newPage();
 
-  const box = page.locator('[data-testid="tweetTextarea_0"]').first();
+  if (fast) {
+    // 回复只关心发帖框，不需要图片/视频/字体 —— 这一步能把页面加载砍掉一半以上
+    await page.route('**/*', (route) => {
+      const type = route.request().resourceType();
+      if (type === 'image' || type === 'media' || type === 'font') return route.abort();
+      return route.continue();
+    });
+  }
+
   try {
-    await box.waitFor({ state: 'visible', timeout: 30000 });
-  } catch {
-    throw new BrowserError(
-      `打开发帖框失败（${page.url()}）。可能是没登录、推文不存在，或页面结构变了`,
-    );
+    const t0 = Date.now();
+    await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    const box = page.locator('[data-testid="tweetTextarea_0"]').first();
+    try {
+      // 无状态上下文没有缓存，首次打开 SPA 要 20–40 秒；等发帖框出现比等网络空闲靠谱
+      await box.waitFor({ state: 'visible', timeout: fast ? 45000 : 60000 });
+    } catch {
+      throw new BrowserError(
+        `打开发帖框失败（${page.url()}）。可能是没登录、推文不存在，或页面结构变了`,
+      );
+    }
+
+    await box.click();
+    // 逐字输入（太快会被识别成粘贴），fast 模式下加快
+    await page.keyboard.type(text, { delay: fast ? 8 : 25 });
+    await page.waitForTimeout(fast ? 400 : 800);
+
+    if (dry) {
+      const shot = path.join(os.tmpdir(), `x-reply-dry-${Date.now()}.png`);
+      await page.screenshot({ path: shot, fullPage: false });
+      return { dry: true, screenshot: shot, url: page.url() };
+    }
+
+    const button = page.locator('[data-testid="tweetButtonInline"]').first();
+    if (!(await button.count())) throw new BrowserError('没找到「回复」按钮（页面结构可能变了）');
+
+    // 按钮未启用时等一会儿
+    for (let i = 0; i < 20; i += 1) {
+      if ((await button.getAttribute('aria-disabled')) !== 'true') break;
+      await page.waitForTimeout(250);
+    }
+
+    await button.click();
+    await page.waitForTimeout(fast ? 2500 : 4000);
+
+    let screenshot = '';
+    if (!fast) {
+      screenshot = path.join(os.tmpdir(), `x-reply-${Date.now()}.png`);
+      await page.screenshot({ path: screenshot, fullPage: false }).catch(() => {});
+    }
+
+    return { ok: true, screenshot, url: page.url(), ms: Date.now() - t0 };
+  } finally {
+    await page.close().catch(() => {});
   }
-
-  await box.click();
-  await page.waitForTimeout(400);
-  // 逐字输入，避免被识别成粘贴
-  await page.keyboard.type(text, { delay: 25 });
-  await page.waitForTimeout(800);
-
-  if (dry) {
-    const shot = path.join(os.tmpdir(), `x-reply-dry-${Date.now()}.png`);
-    await page.screenshot({ path: shot, fullPage: false });
-    return { dry: true, screenshot: shot, url: page.url() };
-  }
-
-  const button = page.locator('[data-testid="tweetButtonInline"]').first();
-  const visible = await button.count();
-  if (!visible) throw new BrowserError('没找到「回复」按钮（页面结构可能变了）');
-
-  // 按钮未启用时等一会儿
-  for (let i = 0; i < 20; i += 1) {
-    const disabled = await button.getAttribute('aria-disabled');
-    if (disabled !== 'true') break;
-    await page.waitForTimeout(300);
-  }
-
-  await button.click();
-  await page.waitForTimeout(4000);
-
-  const shot = path.join(os.tmpdir(), `x-reply-${Date.now()}.png`);
-  await page.screenshot({ path: shot, fullPage: false });
-
-  return { ok: true, screenshot: shot, url: page.url() };
 }
 
 export async function closeContext(context) {
+  if (!context) return;
   try {
     await context.close();
   } catch {
     /* ignore */
   }
+  try {
+    await context.__browser?.close();
+  } catch {
+    /* ignore */
+  }
 }
+
+
+
 

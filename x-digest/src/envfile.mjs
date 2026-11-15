@@ -26,6 +26,7 @@ const ALLOWED = {
   pollIntervalMinutes: 'POLL_INTERVAL_MINUTES',
   mentionWatch: 'MENTION_WATCH',
   mentionPollMinutes: 'MENTION_POLL_MINUTES',
+  mentionMaxPerCycle: 'MENTION_MAX_PER_CYCLE',
   mentionWhitelist: 'MENTION_WHITELIST',
 };
 
@@ -85,6 +86,7 @@ export function patchEnvKeys(file, pairs = {}) {
   if (changed.length) writeFileSync(file, lines.join('\n'), 'utf8');
   return changed;
 }
+
 
 
 

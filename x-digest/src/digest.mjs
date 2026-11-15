@@ -5,7 +5,7 @@ import { compose, composeComment } from './compose.mjs';
 import { loadState, saveState, pruneState, markSeen, newCandidates } from './state.mjs';
 import { latestTweet, latestTweetId, postTweet } from './xpost.mjs';
 import { loadSessionFromFile } from './xsession.mjs';
-import { launchContext, replyToTweet, closeContext } from './browser.mjs';
+import { withContext, replyToTweet } from './browser.mjs';
 import { checkSensitive, safeRule } from './safety.mjs';
 import { recordHistory } from './history.mjs';
 import { describeImage, describeVideo, visionReady } from './vision.mjs';
@@ -369,17 +369,14 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
       if (!posted) {
         if (!targetUrl) throw new Error('浏览器发送需要一个目标推文地址（comment / reply 模式才有）');
         log.info(`用浏览器打开 ${targetUrl} 并回复…`);
-        const context = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
-        try {
-          // 兜底超时：卡住会一直占着"上一轮还在跑"的锁
-          const res = await Promise.race([
-            replyToTweet(context, targetUrl, m.text),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（180 秒）')), 180_000)),
-          ]);
-          posted = { id: '', via: 'browser', screenshot: res?.screenshot ?? '' };
-        } finally {
-          await closeContext(context);
-        }
+        // 复用同一个浏览器上下文，省掉每条都重启的十几秒
+        const res = await withContext(cfg, async (context) =>
+          Promise.race([
+            replyToTweet(context, targetUrl, m.text, { fast: cfg.postMode === 'comment' }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（120 秒）')), 120_000)),
+          ]),
+        );
+        posted = { id: '', via: 'browser', screenshot: res?.screenshot ?? '', ms: res?.ms };
       }
 
       postedAll.push(posted);
@@ -430,6 +427,7 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
 
 
 

@@ -13,8 +13,9 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadSessionFromFile } from './xsession.mjs';
-import { launchContext, replyToTweet, closeContext } from './browser.mjs';
+import { withContext, replyToTweet } from './browser.mjs';
 import { describeImage, describeVideo, visionReady } from './vision.mjs';
+import { recordHistory } from './history.mjs';
 
 const DEFAULT_PROMPT = `你在替一个技术型博主打理 X（推特）。有人 @ 了他，写一句回复。
 
@@ -125,7 +126,7 @@ export async function fetchMentions(cfg, session) {
   const bot = String(cfg.botHandle ?? '').replace(/^@/, '').toLowerCase();
 
   // 用 all 通知流（mentions 标签页的索引会滞后十几分钟）
-  const body = await s.notifications({ count: 20 });
+  const body = await s.notifications({ count: 50 });
   const all = extractMentions(body, bot);
 
   // 自己筛：正文里必须真的 @ 了机器人
@@ -174,7 +175,22 @@ export async function draftReply(cfg, mention, { parentText = '' } = {}) {
  * 跑一轮：找新的 @ → 生成回复 → 用浏览器发出去。
  * @returns {{ matched: number, replied: number, skipped: number, details: string[] }}
  */
+let running = false;
+
 export async function processMentions(cfg, logger = console) {
+  // 一轮可能要 3–5 分钟（每条都要开浏览器），定时器 5 分钟一次会撞上，加个锁
+  if (running) {
+    return { matched: 0, replied: 0, skipped: 0, details: ['上一轮 @ 检查还没跑完'] };
+  }
+  running = true;
+  try {
+    return await runMentionCycle(cfg, logger);
+  } finally {
+    running = false;
+  }
+}
+
+async function runMentionCycle(cfg, logger) {
   const state = readJson(mentionsStateFile(cfg), { handled: {}, lastCheck: 0 });
   const result = { matched: 0, replied: 0, skipped: 0, details: [] };
 
@@ -193,99 +209,127 @@ export async function processMentions(cfg, logger = console) {
 
   const whitelist = new Set(cfg.mentionWhitelist.map((h) => h.toLowerCase()));
   const maxAge = 24 * 3600_000;
-  const fresh = mentions.filter(
-    (m) => !state.handled[m.id] && Date.now() - m.createdAt < maxAge && whitelist.has(m.handle.toLowerCase()),
-  );
+
+  const pending = mentions.filter((m) => !state.handled[m.id] && Date.now() - m.createdAt < maxAge);
+  // 老的先回：否则新 @ 源源不断时，早先那条会被一直挤到队尾
+  const fresh = pending.filter((m) => whitelist.has(m.handle.toLowerCase())).sort((a, b) => a.createdAt - b.createdAt);
 
   result.matched = fresh.length;
+
+  // 诊断：有 @ 但不在白名单里，说清楚，别让它静默消失
+  const ignored = pending.filter((m) => !whitelist.has(m.handle.toLowerCase()));
+  if (ignored.length) {
+    const who = [...new Set(ignored.map((m) => `@${m.handle}`))].slice(0, 5).join(' ');
+    result.details.push(`忽略 ${ignored.length} 条（不在白名单）：${who}`);
+  }
+
   if (!fresh.length) {
     state.lastCheck = Date.now();
     writeJson(mentionsStateFile(cfg), state);
     return result;
   }
 
-  // 一轮只回一条，避免一次性刷屏
-  const target = fresh[0];
+  // 一轮处理几条（默认 3）：只回一条时，连发两条 @ 的其中一条要等下一轮
+  const limit = Math.max(1, Number(cfg.mentionMaxPerCycle) || 3);
+  const targets = fresh.slice(0, limit);
+  if (fresh.length > limit) {
+    result.details.push(`还有 ${fresh.length - limit} 条下轮再回`);
+  }
 
-  // 如果这条 @ 是在回复别人的推，先把原推内容取出来 ——
-  // 否则模型只看到"这是什么"，只能回"我看不到"（这就是之前的 bug）
-  let parentText = '';
-  let parentImages = [];
-  let parentVideo = '';
-  if (target.inReplyTo) {
+  for (let i = 0; i < targets.length; i += 1) {
+    const target = targets[i];
+
+    if (i > 0 && cfg.commentGapSeconds > 0) {
+      logger.info?.(`等下一条 @（${cfg.commentGapSeconds} 秒）…`);
+      await new Promise((r) => setTimeout(r, cfg.commentGapSeconds * 1000));
+    }
+
+    // 这条 @ 如果是在回复别人的推，先把原推内容取出来
+    // （否则模型只看到"这是什么"，只能回"我看不到"）
+    let parentText = '';
+    let parentImages = [];
+    let parentVideo = '';
+    if (target.inReplyTo) {
+      try {
+        const session = loadSessionFromFile(cfg);
+        const conv = await session.conversation(target.inReplyTo);
+        parentText = conv.root?.text ?? '';
+        parentImages = conv.root?.images ?? [];
+        parentVideo = conv.root?.videoUrl ?? '';
+        if (parentText) logger.info?.(`取到原推上下文：${parentText.slice(0, 60)}…`);
+      } catch (err) {
+        logger.warn?.(`取原推失败（将按无上下文处理）：${err.message}`);
+      }
+    }
+
+    if (parentImages.length && visionReady(cfg)) {
+      try {
+        const desc = await describeImage(parentImages[0], cfg);
+        parentText += `\n[配图内容] ${desc}`;
+        logger.info?.(`看图：${desc.slice(0, 60)}…`);
+      } catch (err) {
+        logger.warn?.(`看图失败（不影响回复）：${err.message}`);
+      }
+    } else if (parentVideo && visionReady(cfg) && cfg.visionVideo) {
+      try {
+        const desc = await describeVideo(parentVideo, cfg, { maxFrames: cfg.visionVideoFrames });
+        parentText += `\n[视频内容] ${desc}`;
+        logger.info?.(`看视频：${desc.slice(0, 50)}…`);
+      } catch (err) {
+        logger.warn?.(`视频识别失败（不影响回复）：${err.message}`);
+      }
+    }
+
+    let text;
     try {
-      const session = loadSessionFromFile(cfg);
-      const conv = await session.conversation(target.inReplyTo);
-      parentText = conv.root?.text ?? '';
-      parentImages = conv.root?.images ?? [];
-      parentVideo = conv.root?.videoUrl ?? '';
-      if (parentText) logger.info?.(`取到原推上下文：${parentText.slice(0, 60)}…`);
+      text = await draftReply(cfg, target, { parentText });
     } catch (err) {
-      logger.warn?.(`取原推失败（将按无上下文处理）：${err.message}`);
+      result.details.push(`生成回复失败（@${target.handle}）：${err.message}`);
+      continue;
     }
-  }
 
-  // 原推带图 → 让视觉模型先说一句图里是什么，再交给回复模型
-  if (parentImages.length && visionReady(cfg)) {
+    if (!text) {
+      state.handled[target.id] = { at: Date.now(), handle: target.handle, text: '', skipped: true };
+      result.skipped += 1;
+      result.details.push(`跳过 @${target.handle}：信息不足`);
+      recordHistory(cfg, { id: target.id, handle: target.handle, text: target.text, url: target.url, reason: '模型判断信息不足', action: 'mention-skipped' });
+      continue;
+    }
+
+    logger.info?.(`回复 @${target.handle}：${text}`);
+
     try {
-      const desc = await describeImage(parentImages[0], cfg);
-      parentText += `\n[配图内容] ${desc}`;
-      logger.info?.(`看图：${desc.slice(0, 60)}…`);
+      await withContext(cfg, async (context) => {
+        await Promise.race([
+          replyToTweet(context, target.url, text, { fast: true }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('浏览器发送超时（120 秒）')), 120_000)),
+        ]);
+      });
+      state.handled[target.id] = { at: Date.now(), handle: target.handle, text };
+      result.replied += 1;
+      result.details.push(`已回复 @${target.handle}`);
+      recordHistory(cfg, { id: target.id, handle: target.handle, text: target.text, url: target.url, reason: text.slice(0, 120), action: 'mention-posted' });
     } catch (err) {
-      logger.warn?.(`看图失败（不影响回复）：${err.message}`);
+      // 发失败不标记 handled，下一轮重试；但最多试 3 次，避免一条坏数据永远占坑
+      state.attempts = state.attempts ?? {};
+      state.attempts[target.id] = (state.attempts[target.id] ?? 0) + 1;
+      result.details.push(`发送失败 @${target.handle}（第 ${state.attempts[target.id]} 次）：${err.message}`);
+      recordHistory(cfg, { id: target.id, handle: target.handle, text: target.text, url: target.url, reason: err.message.slice(0, 120), action: 'mention-failed' });
+      if (state.attempts[target.id] >= 3) {
+        state.handled[target.id] = { at: Date.now(), handle: target.handle, text: '', failed: true };
+        result.details.push(`放弃 @${target.handle}（连续 3 次失败）`);
+      }
     }
-  } else if (parentVideo && visionReady(cfg) && cfg.visionVideo) {
-    try {
-      const desc = await describeVideo(parentVideo, cfg, { maxFrames: cfg.visionVideoFrames });
-      parentText += `\n[视频内容] ${desc}`;
-      logger.info?.(`看视频：${desc.slice(0, 50)}…`);
-    } catch (err) {
-      logger.warn?.(`视频识别失败（不影响回复）：${err.message}`);
-    }
-  } else if (parentImages.length && !visionReady(cfg)) {
-    logger.info?.('原推带图，但没有配置视觉模型，跳过图内容');
-  }
-
-  let text;
-  try {
-    text = await draftReply(cfg, target, { parentText });
-  } catch (err) {
-    result.details.push(`生成回复失败：${err.message}`);
-    return result;
-  }
-
-  if (!text) {
-    state.handled[target.id] = { at: Date.now(), handle: target.handle, text: '', skipped: true };
-    state.lastCheck = Date.now();
-    writeJson(mentionsStateFile(cfg), state);
-    result.skipped += 1;
-    result.details.push(`跳过 @${target.handle}：信息不足，没有可回的内容`);
-    logger.info?.(`跳过 @${target.handle}（模型判断没有上下文可回）`);
-    return result;
-  }
-
-  logger.info?.(`回复 @${target.handle}：${text}`);
-
-  try {
-    const context = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
-    try {
-      await replyToTweet(context, target.url, text, { fast: true });
-    } finally {
-      await closeContext(context);
-    }
-    state.handled[target.id] = { at: Date.now(), handle: target.handle, text };
-    result.replied += 1;
-    result.details.push(`已回复 @${target.handle}（${target.url}）`);
-  } catch (err) {
-    result.details.push(`发送失败：${err.message}`);
   }
 
   state.lastCheck = Date.now();
   writeJson(mentionsStateFile(cfg), state);
   return result;
 }
-
 export { mentionsStateFile };
+
+
+
 
 
 

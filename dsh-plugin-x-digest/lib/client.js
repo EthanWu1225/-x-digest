@@ -86,6 +86,9 @@ window.__ModuleLoader__.load({
       dry: { label: '干跑', color: '#6b7280' },
       sensitive: { label: '敏感·已拦截', color: '#dc2626' },
       flagged: { label: '含敏感词', color: '#b45309' },
+      'mention-posted': { label: '回了 @', color: '#15803d' },
+      'mention-skipped': { label: '@·跳过', color: '#6b7280' },
+      'mention-failed': { label: '@·失败', color: '#dc2626' },
       failed: { label: '失败', color: '#dc2626' },
     };
 
@@ -207,6 +210,7 @@ window.__ModuleLoader__.load({
               visionMaxVideos: String(data.config.visionMaxVideos ?? 1),
               mentionWatch: Boolean(data.config.mentionWatch),
               mentionPollMinutes: String(data.config.mentionPollMinutes ?? 5),
+              mentionMaxPerCycle: String(data.config.mentionMaxPerCycle ?? 3),
               mentionWhitelist: data.config.mentionWhitelist ?? '',
               filterPolitics: data.config.filterPolitics !== false,
             });
@@ -682,6 +686,19 @@ window.__ModuleLoader__.load({
                 ),
                 h(
                   'div',
+                  { style: { ...S.field, width: 150 } },
+                  h('label', { style: S.label }, '每轮最多回几条'),
+                  h('input', {
+                    style: S.input,
+                    type: 'number',
+                    min: 1,
+                    max: 5,
+                    value: form.mentionMaxPerCycle,
+                    onChange: (e) => setForm({ ...form, mentionMaxPerCycle: e.target.value }),
+                  }),
+                ),
+                h(
+                  'div',
                   { style: { ...S.field, width: 160 } },
                   h('label', { style: S.label }, '检查频率（分钟）'),
                   h('input', {
@@ -1027,6 +1044,7 @@ window.__ModuleLoader__.load({
     };
   },
 });
+
 
 
 

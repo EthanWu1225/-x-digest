@@ -138,6 +138,8 @@ export function loadConfig() {
     // —— 监听 @ 我的提及，自动回复 ——
     mentionWatch: bool('MENTION_WATCH', true),
     mentionPollMinutes: num('MENTION_POLL_MINUTES', 5),
+    // 一轮最多回几条 @（连续被 @ 时不至于只回一条）
+    mentionMaxPerCycle: num('MENTION_MAX_PER_CYCLE', 3),
     // 只回白名单里的人（留空则回 TARGET_HANDLE）
     mentionWhitelist: [],
     botHandle: handle(str('BOT_HANDLE')),
@@ -225,6 +227,7 @@ export function validateForRun(cfg) {
   }
   return problems;
 }
+
 
 
 
