@@ -184,11 +184,14 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
 
   if (!all.length) {
     state.lastRunAt = startedAt;
+    // 网络问题通常是暂时的：3 分钟后重试，而不是等满一个轮询间隔（默认 30 分钟）
+    state.retryAt = Date.now() + 3 * 60_000;
     saveState(cfg.paths.state, pruneState(state));
-    result.skipped = '一条都没抓到（网络/来源问题，看上面的 warn）';
+    result.skipped = '一条都没抓到（网络/来源问题，看上面的 warn），3 分钟后重试';
     log.warn(result.skipped);
     return result;
   }
+  delete state.retryAt;
 
   const candidates = newCandidates(all, state.seen)
     .sort((a, b) => b.createdAt - a.createdAt)

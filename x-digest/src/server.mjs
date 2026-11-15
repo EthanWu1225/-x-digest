@@ -484,8 +484,10 @@ export function startServer(cfg, logger) {
   const intervalMs = cfg.pollIntervalMinutes * 60_000;
   const timer = setInterval(async () => {
     if (state.running) return;
-    if (Date.now() - state.lastRun < intervalMs) return;
-    logger.info('定时触发一轮');
+    // 上一轮因为网络失败时会设 retryAt，到点就重试（3 分钟），不用等满整个轮询间隔
+    const retryDue = state.retryAt && Date.now() >= state.retryAt;
+    if (!retryDue && Date.now() - state.lastRun < intervalMs) return;
+    logger.info(retryDue ? '网络恢复重试一轮' : '定时触发一轮');
     try {
       const result = await run({ dry: false });
       if (result.text) logger.debug(result.text);
