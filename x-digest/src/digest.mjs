@@ -148,6 +148,9 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
 
   // 优先用 cookie 会话读关注时间线（登录态才有的权限）；
   // 没有 cookie 或会话失效时，退回匿名来源（多半会被 429，但至少给出明确原因）。
+  // 连续失败超过 5 次后，抓取阶段的逐条告警也静音
+  const netQuiet = (state.netFailStreak ?? 0) > 5;
+
   let all = [];
   try {
     const sessionFeed =
@@ -164,14 +167,14 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
     );
     if (sessionFeed.errors?.length) result.errors.push(...sessionFeed.errors);
   } catch (sessionErr) {
-    log.debug(`会话来源不可用：${sessionErr.message}，退回匿名来源`);
+    if (!netQuiet) log.debug(`会话来源不可用：${sessionErr.message}，退回匿名来源`);
     result.errors.push(`session: ${sessionErr.message}`);
 
     const fetched = await fetchAll(cfg.handles, cfg, {
       onItem: (handle, r) => {
         if (r.error) {
           result.errors.push(`${handle}: ${r.error}`);
-          log.warn(`抓取失败 @${handle}: ${r.error}`);
+          if (!netQuiet) log.warn(`抓取失败 @${handle}: ${r.error}`);
         } else {
           result.fetched += r.items.length;
           log.debug(`@${handle} 抓到 ${r.items.length} 条（${r.source}）`);
@@ -184,13 +187,28 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
 
   if (!all.length) {
     state.lastRunAt = startedAt;
-    // 网络问题通常是暂时的：3 分钟后重试，而不是等满一个轮询间隔（默认 30 分钟）
-    state.retryAt = Date.now() + 3 * 60_000;
+
+    // 连续失败计数：前 5 次每次 3 分钟后重试；之后退避到正常间隔并闭嘴
+    state.netFailStreak = (state.netFailStreak ?? 0) + 1;
+    const streak = state.netFailStreak;
+    state.retryAt = Date.now() + (streak <= 5 ? 3 * 60_000 : cfg.pollIntervalMinutes * 60_000);
     saveState(cfg.paths.state, pruneState(state));
-    result.skipped = '一条都没抓到（网络/来源问题，看上面的 warn），3 分钟后重试';
-    log.warn(result.skipped);
+
+    result.skipped = `一条都没抓到（连续失败 ${streak} 次）`;
+    if (streak <= 5) {
+      log.warn(`${result.skipped}：网络/来源问题，3 分钟后重试`);
+    } else if (streak === 6) {
+      log.warn('网络已连续失败 5 次，进入静默：恢复前不再逐次报错');
+    }
+    // 第 7 次起完全不输出（连 debug 也不写）
     return result;
   }
+
+  // 恢复：之前静默过就补一条提示
+  if ((state.netFailStreak ?? 0) > 5) {
+    log.info(`网络已恢复（此前连续失败 ${state.netFailStreak} 次）`);
+  }
+  state.netFailStreak = 0;
   delete state.retryAt;
 
   const candidates = newCandidates(all, state.seen)
@@ -430,6 +448,7 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
 
 
 
