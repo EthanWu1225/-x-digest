@@ -476,6 +476,8 @@ export function startServer(cfg, logger) {
     }
   });
 
+
+
   server.listen(cfg.server.port, cfg.server.host, () => {
     logger.info(`监听 http://${cfg.server.host}:${cfg.server.port}（token ${cfg.server.token ? '已启用' : '未设置'}）`);
   });
@@ -532,6 +534,9 @@ export function startServer(cfg, logger) {
 
   return { server, close, run };
 }
+
+
+
 
 
 

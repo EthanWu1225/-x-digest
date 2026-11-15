@@ -185,14 +185,16 @@ let idleTimer = null;
 export async function withContext(cfg, fn) {
   await ensureReachable();
   if (!sharedCtx) {
-    sharedCtx = await launchStateless(cfg);
+    // 用持久化 profile：里面有真实登录态和浏览历史，X 不容易拦；
+    // 代价是启动慢，所以下面会复用、预热，尽量只付一次。
+    sharedCtx = await launchContext({ dataDir: cfg.dataDir, headless: cfg.browserHeadless });
   }
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     const dying = sharedCtx;
     sharedCtx = null;
     closeContext(dying);
-  }, 600_000); // 保活 10 分钟：@ 每 5 分钟一轮，别每轮都冷启动
+  }, 1_800_000); // 保活 30 分钟：轮询间隔 30 分钟，尽量复用暖上下文
   idleTimer.unref?.();
 
   try {
@@ -200,8 +202,27 @@ export async function withContext(cfg, fn) {
   } catch (err) {
     const dying = sharedCtx;
     sharedCtx = null;
-    await closeContext(dying);
+    // 注意：这里不能 await 关闭 —— 浏览器卡死时 close() 也会卡死，
+    // 结果就是整轮永远挂在那儿（之前踩过）。后台关、带超时。
+    closeContext(dying).catch(() => {});
     throw err;
+  }
+}
+
+/**
+ * 预热：服务启动时先把浏览器拉起来并打开一次 x.com，
+ * 把 DNS/TLS/SPA 资源缓存热起来，第一条回复就不用等 100 秒。
+ */
+export async function prewarm(cfg, log) {
+  try {
+    await withContext(cfg, async (context) => {
+      const page = await context.newPage();
+      await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.close();
+    });
+    log?.info?.('浏览器已预热');
+  } catch (err) {
+    log?.warn?.(`预热失败（不影响运行）：${err.message.slice(0, 80)}`);
   }
 }
 
@@ -281,19 +302,26 @@ export async function replyToTweet(context, tweetUrl, text, { dry = false, fast 
   }
 }
 
-export async function closeContext(context) {
+export async function closeContext(context, timeoutMs = 15_000) {
   if (!context) return;
-  try {
-    await context.close();
-  } catch {
-    /* ignore */
-  }
-  try {
-    await context.__browser?.close();
-  } catch {
-    /* ignore */
-  }
+  const closer = (async () => {
+    try {
+      await context.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await context.__browser?.close();
+    } catch {
+      /* ignore */
+    }
+  })();
+  // 关闭本身也可能卡死，别让它拖住整个流程
+  await Promise.race([closer, new Promise((r) => setTimeout(r, timeoutMs))]);
 }
+
+
+
 
 
 

@@ -16,6 +16,7 @@ import { loadSessionFromFile } from './xsession.mjs';
 import { withContext, replyToTweet } from './browser.mjs';
 import { describeImage, describeVideo, visionReady } from './vision.mjs';
 import { recordHistory } from './history.mjs';
+import { withHeavyLock } from './lock.mjs';
 
 const DEFAULT_PROMPT = `你在替一个技术型博主打理 X（推特）。有人 @ 了他，写一句回复。
 
@@ -179,15 +180,7 @@ let running = false;
 
 export async function processMentions(cfg, logger = console) {
   // 一轮可能要 3–5 分钟（每条都要开浏览器），定时器 5 分钟一次会撞上，加个锁
-  if (running) {
-    return { matched: 0, replied: 0, skipped: 0, details: ['上一轮 @ 检查还没跑完'] };
-  }
-  running = true;
-  try {
-    return await runMentionCycle(cfg, logger);
-  } finally {
-    running = false;
-  }
+  return withHeavyLock(() => runMentionCycle(cfg, logger));
 }
 
 async function runMentionCycle(cfg, logger) {
@@ -327,6 +320,7 @@ async function runMentionCycle(cfg, logger) {
   return result;
 }
 export { mentionsStateFile };
+
 
 
 

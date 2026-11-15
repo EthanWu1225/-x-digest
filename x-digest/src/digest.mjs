@@ -5,6 +5,7 @@ import { compose, composeComment } from './compose.mjs';
 import { loadState, saveState, pruneState, markSeen, newCandidates } from './state.mjs';
 import { latestTweet, latestTweetId, postTweet } from './xpost.mjs';
 import { loadSessionFromFile } from './xsession.mjs';
+import { withHeavyLock } from './lock.mjs';
 import { withContext, replyToTweet } from './browser.mjs';
 import { checkSensitive, safeRule } from './safety.mjs';
 import { recordHistory } from './history.mjs';
@@ -131,7 +132,12 @@ export function postsToday(state, cfg, now = new Date()) {
  * 跑一轮：抓 → 去重 → 让 DeepSeek 挑 → 拼文案 → （或）发出去。
  * dry = true 时只打印，不碰 X 的写接口。
  */
-export async function runCycle(cfg, { dry = false, logger = console, force = false } = {}) {
+export async function runCycle(cfg, opts = {}) {
+  // 和 @ 检查互斥：两个流程同时开浏览器 / 打 x.com 既慢又容易超时
+  return withHeavyLock(() => runCycleInner(cfg, opts));
+}
+
+async function runCycleInner(cfg, { dry = false, logger = console, force = false } = {}) {
   const log = logger.info ? logger : { info: console.log, warn: console.warn, error: console.error, debug() {} };
   const state = loadState(cfg.paths.state);
   const startedAt = Date.now();
@@ -448,6 +454,7 @@ export async function runCycle(cfg, { dry = false, logger = console, force = fal
   saveState(cfg.paths.state, pruneState(state));
   return result;
 }
+
 
 
 
